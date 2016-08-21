@@ -1,4 +1,7 @@
-[![Build_Status](https://travis-ci.org/jrconlin/pywebpush.svg?branch=master)](https://travis-ci.org/jrconlin/pywebpush)
+# tWebPush is neutral version of PyWebPush for http client library
+
+It is small fork for developers who want to use WebPush without request library.
+In my use case I use Tornado framework for async push.
 
 # Webpush Data encryption library for Python
 
@@ -47,16 +50,16 @@ https://android.googleapis.com/gcm/send
 [VAPID](https://github.com/mozilla-services/vapid/tree/master/python)
 self identification headers). It is optional and may be omitted.
 
-to send:
+get data:
 ```
-WebPusher(subscription_info).send(data, headers)
+endpoint, body, headers = WebPusher(subscription_info).send(data, headers)
 ```
-to send for Chrome:
+get data for Chrome:
 ```
-WebPusher(subscription_info).send(data, headers, ttl, gcm_key)
+endpoint, body, headers = WebPusher(subscription_info).send(data, headers, ttl, gcm_key)
 ```
 
-You can also simply encode the data to send later by calling
+You can also simply encode the data to send later by calling (but without headers and etc)
 
 ```
 encoded = WebPush(subscription_info).encode(data)

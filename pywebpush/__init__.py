@@ -9,7 +9,6 @@ import os
 import six
 import http_ece
 import pyelliptic
-import requests
 
 
 class WebPushException(Exception):
@@ -153,7 +152,7 @@ class WebPusher:
         })
 
     def send(self, data, headers={}, ttl=0, gcm_key=None, reg_id=None):
-        """Encode and send the data to the Push Service.
+        """Encode and get the data to the Push Service.
 
         :param data: A serialized block of data (see encode() ).
         :param headers: A dictionary containing any additional HTTP headers.
@@ -209,6 +208,4 @@ class WebPusher:
             headers['ttl'] = ttl
         # Additionally useful headers:
         # Authorization / Crypto-Key (VAPID headers)
-        return requests.post(endpoint,
-                             data=encoded_data,
-                             headers=headers)
+        return endpoint, encoded_data, headers
