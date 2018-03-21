@@ -377,4 +377,3 @@ def webpush(subscription_info,
         raise WebPushException("Push failed: {}: {}".format(
             result, result.text))
     return result
->>>>>>> 13e747d7f4a40ccf03596ab696697ef00f255339
