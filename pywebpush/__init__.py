@@ -109,11 +109,6 @@ class WebPusher:
         :type requests_session: requests.Session
 
         """
-        if requests_session is None:
-            self.requests_method = requests
-        else:
-            self.requests_method = requests_session
-
         if 'endpoint' not in subscription_info:
             raise WebPushException("subscription_info missing endpoint URL")
         self.subscription_info = deepcopy(subscription_info)
