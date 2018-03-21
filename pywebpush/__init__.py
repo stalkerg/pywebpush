@@ -14,7 +14,6 @@ except ImportError:  # pragma nocover
 
 import six
 import http_ece
-import requests
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec
 from py_vapid import Vapid
