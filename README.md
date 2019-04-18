@@ -70,8 +70,8 @@ in the `subscription_info` block.
 *data* - can be any serial content (string, bit array, serialized JSON, etc), but be sure that your receiving
 application is able to parse and understand it. (e.g. `data = "Mary had a little lamb."`)
 
-*content_type* - specifies the form of Encryption to use, either `'aesgcm'` or the newer `'aes128gcm'`. NOTE that 
-not all User Agents can decrypt `'aes128gcm'`, so the library defaults to the older form.
+*content_type* - specifies the form of Encryption to use, either `'aes128gcm'` or the deprecated `'aesgcm'`. NOTE that
+not all User Agents can decrypt `'aesgcm'`, so the library defaults to the RFC 8188 standard form.
 
 *vapid_claims* - a `dict` containing the VAPID claims required for authorization (See
 [py_vapid](https://github.com/web-push-libs/vapid/tree/master/python) for more details). If `aud` is not specified,
@@ -108,6 +108,14 @@ try:
     )
 except WebPushException as ex:
     print("I'm sorry, Dave, but I can't do that: {}", repr(ex))
+    # Mozilla returns additional information in the body of the response.
+    if ex.response and ex.response.json():
+        extra = ex.response.json()
+        print("Remote service replied with a {}:{}, {}",
+              extra.code,
+              extra.errno,
+              extra.message
+              )
 ```
 
 ### Methods
@@ -117,7 +125,7 @@ can pass just `wp = WebPusher(subscription_info)`. This will return a `WebPusher
 
 The following methods are available:
 
-#### `.send(data, headers={}, ttl=0, gcm_key="", reg_id="", content_encoding="aesgcm", curl=False, timeout=None)`
+#### `.send(data, headers={}, ttl=0, gcm_key="", reg_id="", content_encoding="aes128gcm", curl=False, timeout=None)`
 
 Send the data using additional parameters. On error, returns a `WebPushException`
 
@@ -134,7 +142,7 @@ Developer Console.
 
 *reg_id* Google Cloud Messaging registration ID (will be extracted from endpoint if not specified)
 
-*content_encoding* ECE content encoding type (defaults to "aesgcm")
+*content_encoding* ECE content encoding type (defaults to "aes128gcm")
 
 *curl* Do not execute the POST, but return as a `curl` command. This will write the encrypted content to a local file
 named `encrpypted.data`. This command is meant to be used for debugging purposes.
@@ -150,7 +158,7 @@ to send from Chrome using the old GCM mode:
 WebPusher(subscription_info).send(data, headers, ttl, gcm_key)
 ```
 
-#### `.encode(data, content_encoding="aesgcm")`
+#### `.encode(data, content_encoding="aes128gcm")`
 
 Encode the `data` for future use. On error, returns a `WebPushException`
 
@@ -158,12 +166,38 @@ Encode the `data` for future use. On error, returns a `WebPushException`
 
 *data* Binary string of data to send
 
-*content_encoding* ECE content encoding type (defaults to "aesgcm")
+*content_encoding* ECE content encoding type (defaults to "aes128gcm")
 
 **Example**
 
 ```python
 encoded_data = WebPush(subscription_info).encode(data)
 ```
+
+## Stand Alone Webpush
+
+If you're not really into coding your own solution, there's also a "stand-alone" `pywebpush` command in the
+./bin directory.
+
+This uses two files:
+* the *data* file, which contains the message to send, in whatever form you like.
+* the *subscription info* file, which contains the subscription information as JSON encoded data. This is usually returned by the Push `subscribe` method and looks something like:
+
+```json
+{"endpoint": "https://push...",
+ "keys": {
+     "auth": "ab01...",
+     "p256dh": "aa02..."
+ }}
+```
+
+If you're interested in just testing your applications WebPush interface, you could use the Command Line:
+
+```bash
+./bin/pywebpush --data stuff_to_send.data --info subscription.info
+```
+which will encrypt and send the contents of `stuff_to_send.data`.
+
+See `./bin/pywebpush --help` for available commands and options.
 
 

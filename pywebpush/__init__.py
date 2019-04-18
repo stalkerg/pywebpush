@@ -6,6 +6,7 @@ import base64
 from copy import deepcopy
 import json
 import os
+import time
 
 try:
     from urllib.parse import urlparse
@@ -16,11 +17,31 @@ import six
 import http_ece
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
 from py_vapid import Vapid
 
 
 class WebPushException(Exception):
-    pass
+    """Web Push failure.
+
+    This may contain the requests.Response
+
+    """
+
+    def __init__(self, message, response=None):
+        self.message = message
+        self.response = response
+
+    def __str__(self):
+        extra = ""
+        if self.response:
+            try:
+                extra = ", Response {}".format(
+                    self.response.text,
+                )
+            except AttributeError:
+                extra = ", Response {}".format(self.response)
+        return "WebPushException: {}{}".format(self.message, extra)
 
 
 class CaseInsensitiveDict(dict):
@@ -92,7 +113,7 @@ class WebPusher:
     valid_encodings = [
         # "aesgcm128",  # this is draft-0, but DO NOT USE.
         "aesgcm",  # draft-httpbis-encryption-encoding-01
-        "aes128gcm"  # draft-httpbis-encryption-encoding-04
+        "aes128gcm"  # RFC8188 Standard encoding
     ]
 
     def __init__(self, subscription_info, requests_session=None):
@@ -132,7 +153,7 @@ class WebPusher:
         """Add base64 padding to the end of a string, if required"""
         return data + b"===="[:len(data) % 4]
 
-    def encode(self, data, content_encoding="aesgcm"):
+    def encode(self, data, content_encoding="aes128gcm"):
         """Encrypt the data.
 
         :param data: A serialized block of byte data (String, JSON, bit array,
@@ -140,9 +161,8 @@ class WebPusher:
             to understand it.
         :type data: str
         :param content_encoding: The content_encoding type to use to encrypt
-            the data. Defaults to draft-01 "aesgcm". Latest draft-04 is
-            "aes128gcm", however not all clients may be able to use this
-            format.
+            the data. Defaults to RFC8188 "aes128gcm". The previous draft-01 is
+            "aesgcm", however this format is now deprecated.
         :type content_encoding: enum("aesgcm", "aes128gcm")
 
         """
@@ -156,33 +176,45 @@ class WebPusher:
             raise WebPushException("Invalid content encoding specified. "
                                    "Select from " +
                                    json.dumps(self.valid_encodings))
-        if (content_encoding == "aesgcm"):
+        if content_encoding == "aesgcm":
             salt = os.urandom(16)
         # The server key is an ephemeral ECDH key used only for this
         # transaction
         server_key = ec.generate_private_key(ec.SECP256R1, default_backend())
-        crypto_key = base64.urlsafe_b64encode(
-            server_key.public_key().public_numbers().encode_point()
-        ).strip(b'=')
+        crypto_key = server_key.public_key().public_bytes(
+            encoding=serialization.Encoding.X962,
+            format=serialization.PublicFormat.UncompressedPoint
+        )
 
         if isinstance(data, six.string_types):
             data = bytes(data.encode('utf8'))
-
-        encrypted = http_ece.encrypt(
-            data,
-            salt=salt,
-            keyid=crypto_key.decode(),
-            private_key=server_key,
-            dh=self.receiver_key,
-            auth_secret=self.auth_key,
-            version=content_encoding)
-
-        reply = CaseInsensitiveDict({
-            'crypto_key': crypto_key,
-            'body': encrypted,
-        })
-        if salt:
-            reply['salt'] = base64.urlsafe_b64encode(salt).strip(b'=')
+        if content_encoding == "aes128gcm":
+            encrypted = http_ece.encrypt(
+                data,
+                salt=salt,
+                private_key=server_key,
+                dh=self.receiver_key,
+                auth_secret=self.auth_key,
+                version=content_encoding)
+            reply = CaseInsensitiveDict({
+                'body': encrypted
+            })
+        else:
+            crypto_key = base64.urlsafe_b64encode(crypto_key).strip(b'=')
+            encrypted = http_ece.encrypt(
+                data,
+                salt=salt,
+                private_key=server_key,
+                keyid=crypto_key.decode(),
+                dh=self.receiver_key,
+                auth_secret=self.auth_key,
+                version=content_encoding)
+            reply = CaseInsensitiveDict({
+                'crypto_key': crypto_key,
+                'body': encrypted,
+            })
+            if salt:
+                reply['salt'] = base64.urlsafe_b64encode(salt).strip(b'=')
         return reply
 
     def as_curl(self, endpoint, encoded_data, headers):
@@ -211,12 +243,12 @@ class WebPusher:
             data = "--data-binary @encrypted.data"
         if 'content-length' not in headers:
             header_list.append(
-                '-H "content-length: {}" \\ \n'.format(len(data)))
+                '-H "content-length: {}" \\ \n'.format(len(encoded_data)))
         return ("""curl -vX POST {url} \\\n{headers}{data}""".format(
             url=endpoint, headers="".join(header_list), data=data))
 
     def send(self, data=None, headers=None, ttl=0, gcm_key=None, reg_id=None,
-             content_encoding="aesgcm", curl=False, timeout=None):
+             content_encoding="aes128gcm", curl=False, timeout=None):
         """Encode and send the data to the Push Service.
         :param data: A serialized block of data (see encode() ).
         :type data: str
@@ -232,7 +264,7 @@ class WebPusher:
         :param reg_id: registration id of the recipient. If not provided,
             it will be extracted from the endpoint.
         :type reg_id: str
-        :param content_encoding: ECE content encoding (defaults to "aesgcm")
+        :param content_encoding: ECE content encoding (defaults to "aes128gcm")
         :type content_encoding: str
         :param curl: Display output as `curl` command instead of sending
         :type curl: bool
@@ -246,22 +278,36 @@ class WebPusher:
         encoded = {}
         headers = CaseInsensitiveDict(headers)
         if data:
-            encoded = self.encode(data)
-            # Append the p256dh to the end of any existing crypto-key
-            crypto_key = headers.get("crypto-key", "")
-            if crypto_key:
-                # due to some confusion by a push service provider, we should
-                # use ';' instead of ',' to append the headers.
-                # see https://github.com/webpush-wg/webpush-encryption/issues/6
-                crypto_key += ';'
-            crypto_key += ("dh=" + encoded["crypto_key"].decode('utf8'))
+            encoded = self.encode(data, content_encoding)
+            if "crypto_key" in encoded:
+                # Append the p256dh to the end of any existing crypto-key
+                crypto_key = headers.get("crypto-key", "")
+                if crypto_key:
+                    # due to some confusion by a push service provider, we
+                    # should use ';' instead of ',' to append the headers.
+                    # see
+                    # https://github.com/webpush-wg/webpush-encryption/issues/6
+                    crypto_key += ';'
+                crypto_key += (
+                    "dh=" + encoded["crypto_key"].decode('utf8'))
+                headers.update({
+                    'crypto-key': crypto_key
+                })
+            if "salt" in encoded:
+                headers.update({
+                    'encryption': "salt=" + encoded['salt'].decode('utf8')
+                })
             headers.update({
-                'crypto-key': crypto_key,
                 'content-encoding': content_encoding,
-                'encryption': "salt=" + encoded['salt'].decode('utf8'),
             })
         if gcm_key:
-            endpoint = 'https://android.googleapis.com/gcm/send'
+            # guess if it is a legacy GCM project key or actual FCM key
+            # gcm keys are all about 40 chars (use 100 for confidence),
+            # fcm keys are 153-175 chars
+            if len(gcm_key) < 100:
+                endpoint = 'https://android.googleapis.com/gcm/send'
+            else:
+                endpoint = 'https://fcm.googleapis.com/fcm/send'
             reg_ids = []
             if not reg_id:
                 reg_id = self.subscription_info['endpoint'].rsplit('/', 1)[-1]
@@ -293,7 +339,7 @@ def webpush(subscription_info,
             data=None,
             vapid_private_key=None,
             vapid_claims=None,
-            content_encoding="aesgcm",
+            content_encoding="aes128gcm",
             curl=False,
             timeout=None,
             ttl=0):
@@ -347,6 +393,9 @@ def webpush(subscription_info,
             url = urlparse(subscription_info.get('endpoint'))
             aud = "{}://{}".format(url.scheme, url.netloc)
             vapid_claims['aud'] = aud
+        if not vapid_claims.get('exp'):
+            # encryption lives for 12 hours
+            vapid_claims['exp'] = int(time.time()) + (12 * 60 * 60)
         if not vapid_private_key:
             raise WebPushException("VAPID dict missing 'private_key'")
         if isinstance(vapid_private_key, Vapid):
@@ -359,7 +408,7 @@ def webpush(subscription_info,
         else:
             vv = Vapid.from_string(private_key=vapid_private_key)
         vapid_headers = vv.sign(vapid_claims)
-    result = WebPusher(subscription_info).send(
+    response = WebPusher(subscription_info).send(
         data,
         vapid_headers,
         ttl=ttl,
@@ -367,7 +416,8 @@ def webpush(subscription_info,
         curl=curl,
         timeout=timeout,
     )
-    if not curl and result.status_code > 202:
-        raise WebPushException("Push failed: {}: {}".format(
-            result, result.text))
-    return result
+    if not curl and response.status_code > 202:
+        raise WebPushException("Push failed: {} {}".format(
+            response.status_code, response.reason),
+            response=response)
+    return response

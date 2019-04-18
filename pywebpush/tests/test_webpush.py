@@ -3,10 +3,11 @@ import json
 import os
 import unittest
 
-from mock import patch
+from mock import patch, Mock
 from nose.tools import eq_, ok_, assert_is_not, assert_raises
 import http_ece
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 import py_vapid
 
@@ -38,8 +39,10 @@ class WebpushTestCase(unittest.TestCase):
 
     def _get_pubkey_str(self, priv_key):
         return base64.urlsafe_b64encode(
-            priv_key.public_key().public_numbers().encode_point()
-        ).strip(b'=')
+            priv_key.public_key().public_bytes(
+                encoding=serialization.Encoding.X962,
+                format=serialization.PublicFormat.UncompressedPoint
+            )).strip(b'=')
 
     def test_init(self):
         # use static values so we know what to look for in the reply
@@ -100,11 +103,12 @@ class WebpushTestCase(unittest.TestCase):
             if 'salt' in encoded:
                 raw_salt = base64.urlsafe_b64decode(
                     push._repad(encoded['salt']))
-            raw_dh = base64.urlsafe_b64decode(
-                push._repad(encoded['crypto_key']))
+            raw_dh = None
+            if content_encoding != "aes128gcm":
+                raw_dh = base64.urlsafe_b64decode(
+                    push._repad(encoded['crypto_key']))
             raw_auth = base64.urlsafe_b64decode(
                 push._repad(subscription_info['keys']['auth']))
-
             decoded = http_ece.decrypt(
                 encoded['body'],
                 salt=raw_salt,
@@ -134,11 +138,10 @@ class WebpushTestCase(unittest.TestCase):
         eq_(subscription_info.get('endpoint'), mock_post.call_args[0][0])
         pheaders = mock_post.call_args[1].get('headers')
         eq_(pheaders.get('ttl'), '0')
-        ok_('encryption' in pheaders)
         eq_(pheaders.get('AUTHENTICATION'), headers.get('Authentication'))
         ckey = pheaders.get('crypto-key')
         ok_('pre-existing' in ckey)
-        eq_(pheaders.get('content-encoding'), 'aesgcm')
+        eq_(pheaders.get('content-encoding'), 'aes128gcm')
 
     @patch("requests.post")
     def test_send_vapid(self, mock_post):
@@ -149,7 +152,8 @@ class WebpushTestCase(unittest.TestCase):
             subscription_info=subscription_info,
             data=data,
             vapid_private_key=self.vapid_key,
-            vapid_claims={"sub": "mailto:ops@example.com"}
+            vapid_claims={"sub": "mailto:ops@example.com"},
+            content_encoding="aesgcm"
         )
         eq_(subscription_info.get('endpoint'), mock_post.call_args[0][0])
         pheaders = mock_post.call_args[1].get('headers')
@@ -164,7 +168,6 @@ class WebpushTestCase(unittest.TestCase):
             ).decode('utf8')
         )
         ok_(subscription_info.get('endpoint').startswith(auth['aud']))
-        ok_('encryption' in pheaders)
         ok_('WebPush' in pheaders.get('authorization'))
         ckey = pheaders.get('crypto-key')
         ok_('p256ecdsa=' in ckey)
@@ -262,8 +265,7 @@ class WebpushTestCase(unittest.TestCase):
         eq_(subscription_info.get('endpoint'), mock_post.call_args[0][0])
         pheaders = mock_post.call_args[1].get('headers')
         eq_(pheaders.get('ttl'), '0')
-        ok_('encryption' in pheaders)
-        eq_(pheaders.get('content-encoding'), 'aesgcm')
+        eq_(pheaders.get('content-encoding'), 'aes128gcm')
 
     @patch("pywebpush.open")
     def test_as_curl(self, opener):
@@ -281,9 +283,8 @@ class WebpushTestCase(unittest.TestCase):
         for s in [
             "curl -vX POST https://example.com",
             "-H \"crypto-key: p256ecdsa=",
-            "-H \"content-encoding: aesgcm\"",
+            "-H \"content-encoding: aes128gcm\"",
             "-H \"authorization: WebPush ",
-            "-H \"encryption: salt=",
             "-H \"ttl: 0\"",
             "-H \"content-length:"
         ]:
@@ -334,8 +335,36 @@ class WebpushTestCase(unittest.TestCase):
             mock_session.post.call_args[0][0])
         pheaders = mock_session.post.call_args[1].get('headers')
         eq_(pheaders.get('ttl'), '0')
-        ok_('encryption' in pheaders)
         eq_(pheaders.get('AUTHENTICATION'), headers.get('Authentication'))
         ckey = pheaders.get('crypto-key')
         ok_('pre-existing' in ckey)
-        eq_(pheaders.get('content-encoding'), 'aesgcm')
+        eq_(pheaders.get('content-encoding'), 'aes128gcm')
+
+
+class WebpushExceptionTestCase(unittest.TestCase):
+
+    def test_exception(self):
+        from requests import Response
+
+        exp = WebPushException("foo")
+        assert ("{}".format(exp) == "WebPushException: foo")
+        # Really should try to load the response to verify, but this mock
+        # covers what we need.
+        response = Mock(spec=Response)
+        response.text = (
+             '{"code": 401, "errno": 109, "error": '
+             '"Unauthorized", "more_info": "http://'
+             'autopush.readthedocs.io/en/latest/htt'
+             'p.html#error-codes", "message": "Requ'
+             'est did not validate missing authoriz'
+             'ation header"}')
+        response.json.return_value = json.loads(response.text)
+        response.status_code = 401
+        response.reason = "Unauthorized"
+        exp = WebPushException("foo", response)
+        assert "{}".format(exp) == "WebPushException: foo, Response {}".format(
+                response.text)
+        assert '{}'.format(exp.response), '<Response [401]>'
+        assert exp.response.json().get('errno') == 109
+        exp = WebPushException("foo", [1, 2, 3])
+        assert '{}'.format(exp) == "WebPushException: foo, Response [1, 2, 3]"
